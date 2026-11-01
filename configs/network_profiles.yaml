@@ -1,0 +1,72 @@
+# Network emulation profiles for scripts/netem.py
+#
+# Conventions
+#   * All delays are ONE-WAY, per direction, per link. RTT site<->ground is the
+#     sum over every link in both directions.
+#   * a_to_b / b_to_a refer to the endpoints declared under `links`.
+#     For `access`, a_to_b = site->sat1 = USER UPLINK (the 8 Mbps bottleneck).
+#   * rate: tc syntax (kbit, mbit, gbit). Omit for no rate cap.
+#   * loss_pct: random loss; use `extra` for raw netem args (e.g. Gilbert-Elliott
+#     "loss gemodel 1% 10% 70% 0.1%").
+#   * queue_ms: tbf queue depth in ms of traffic (bufferbloat knob).
+
+links:
+  access: {a: site, b: sat1,   subnet: 10.10.1.0/24}
+  isl:    {a: sat1, b: sat2,   subnet: 10.10.2.0/24}
+  feeder: {a: sat2, b: ground, subnet: 10.10.3.0/24}
+
+containers:
+  site: leo-site
+  sat1: leo-sat1
+  sat2: leo-sat2
+  ground: leo-ground
+
+profiles:
+
+  # No shaping; sanity reference for raw container-to-container performance.
+  ideal: {}
+
+  # Starlink-like default. Access RTT ~20 ms, end-to-end RTT site<->ground ~50 ms.
+  starlink_baseline:
+    description: "Starlink-like: 8 Mbps uplink, 100 Mbps downlink, ~20 ms access RTT, 0.5% loss"
+    access:
+      a_to_b: {rate: 8mbit,   delay_ms: 10, jitter_ms: 2, jitter_corr_pct: 25, loss_pct: 0.5, queue_ms: 150}
+      b_to_a: {rate: 100mbit, delay_ms: 10, jitter_ms: 2, jitter_corr_pct: 25, loss_pct: 0.5, queue_ms: 150}
+    isl:
+      # Optical ISL: high capacity; one hop ~ 1200 km ~ 4 ms. `hops` multiplies delay.
+      both:   {rate: 1gbit,   delay_ms: 4, hops: 1}
+    feeder:
+      # Sat->gateway (~550 km slant, ~3 ms) + terrestrial backhaul to a far DC (~10 ms).
+      both:   {rate: 1gbit,   delay_ms: 13, jitter_ms: 1}
+
+  # Control condition: identical delay/rate, zero loss. Isolates how much of
+  # the transfer-time penalty is due to TCP loss recovery vs. raw bandwidth.
+  starlink_lossless:
+    description: "Baseline delays/rates with 0% loss (control)"
+    inherits: starlink_baseline
+    access:
+      a_to_b: {rate: 8mbit,   delay_ms: 10, jitter_ms: 2, jitter_corr_pct: 25, queue_ms: 150}
+      b_to_a: {rate: 100mbit, delay_ms: 10, jitter_ms: 2, jitter_corr_pct: 25, queue_ms: 150}
+
+  # Same as baseline, but the image must traverse 4 inter-satellite hops
+  # (e.g. remote site with no nearby gateway).
+  starlink_multihop:
+    description: "Baseline with 4 ISL hops"
+    inherits: starlink_baseline
+    isl:
+      both:   {rate: 1gbit, delay_ms: 4, hops: 4}
+
+  # Degraded: heavy weather / congested cell.
+  starlink_degraded:
+    description: "Congested cell: 4 Mbps uplink, higher jitter, 2% bursty loss"
+    inherits: starlink_baseline
+    access:
+      a_to_b: {rate: 4mbit,  delay_ms: 20, jitter_ms: 8, jitter_corr_pct: 50, extra: "loss gemodel 1% 30% 70% 0.1%", queue_ms: 300}
+      b_to_a: {rate: 50mbit, delay_ms: 20, jitter_ms: 8, jitter_corr_pct: 50, loss_pct: 1.0, queue_ms: 300}
+
+# Time-varying base delay for `netem.py dynamic`. Starlink reallocates
+# satellites every ~15 s, so the access-link base delay is resampled each interval.
+dynamic:
+  link: access
+  interval_s: 15
+  delay_ms_range: [8, 18]

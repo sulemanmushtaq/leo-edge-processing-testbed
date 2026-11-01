@@ -1,0 +1,100 @@
+# LEO edge-processing testbed.
+#
+#   site ──access── sat1 ──isl── sat2 ──feeder── ground
+#
+# Each link is a dedicated bridge network so tc-netem can shape every hop
+# independently, *inside* the container namespaces (no host NIC changes).
+# Usage (from project root):
+#   docker compose -f configs/docker-compose.yml up -d --build
+#   python3 scripts/netem.py apply starlink_baseline
+name: leo
+
+x-node: &node
+  build:
+    context: ..
+    dockerfile: configs/node.Dockerfile
+  image: leo-node:latest
+  cap_add: [NET_ADMIN]          # needed for tc + ip route inside the netns only
+  sysctls:
+    net.ipv4.conf.all.rp_filter: "0"
+    net.ipv4.conf.default.rp_filter: "0"
+  volumes:
+    - ../data/raw:/data/raw      # all logs/metrics land on the host
+    - ../scripts:/opt/leo/scripts:ro
+  restart: unless-stopped
+
+services:
+  site:
+    <<: *node
+    container_name: leo-site
+    hostname: site
+    environment:
+      NODE_ROLE: site
+      ROUTES: "10.10.2.0/24 via 10.10.1.20;10.10.3.0/24 via 10.10.1.20"
+    # Raspberry Pi 4 stand-in. A72 cores are much slower than x86 cores, so the
+    # quota is calibrated later against real Pi 4 timings (see benchmark step).
+    cpus: ${SITE_CPUS:-1.0}
+    mem_limit: ${SITE_MEM:-4g}
+    networks:
+      access: {ipv4_address: 10.10.1.10}
+
+  sat1:                          # access satellite (has orbital compute)
+    <<: *node
+    container_name: leo-sat1
+    hostname: sat1
+    environment:
+      NODE_ROLE: sat1
+      ROUTES: "10.10.3.0/24 via 10.10.2.30"
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    cpus: ${SAT_CPUS:-1.0}
+    mem_limit: ${SAT_MEM:-2g}
+    networks:
+      access: {ipv4_address: 10.10.1.20}
+      isl:    {ipv4_address: 10.10.2.20}
+
+  sat2:                          # gateway satellite (relay only)
+    <<: *node
+    container_name: leo-sat2
+    hostname: sat2
+    environment:
+      NODE_ROLE: sat2
+      ROUTES: "10.10.1.0/24 via 10.10.2.20"
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    cpus: 0.5
+    networks:
+      isl:    {ipv4_address: 10.10.2.30}
+      feeder: {ipv4_address: 10.10.3.30}
+
+  ground:                        # far ground station / cloud, grid-powered, unconstrained
+    <<: *node
+    container_name: leo-ground
+    hostname: ground
+    environment:
+      NODE_ROLE: ground
+      ROUTES: "10.10.1.0/24 via 10.10.3.30;10.10.2.0/24 via 10.10.3.30"
+    networks:
+      feeder: {ipv4_address: 10.10.3.40}
+
+# gateway_mode_ipv4=nat-unprotected: Docker >=28 installs raw-table rules that
+# drop packets addressed to a container unless they arrive on that container's
+# own bridge. That breaks hop-by-hop routing (site -> sat1 -> sat2 -> ground),
+# so we disable it per-network here rather than touching host sysctls/iptables.
+x-net-opts: &net_opts
+  com.docker.network.bridge.gateway_mode_ipv4: nat-unprotected
+
+networks:
+  access:
+    driver_opts: *net_opts
+    ipam: {config: [{subnet: 10.10.1.0/24}]}
+  isl:
+    driver_opts: *net_opts
+    ipam: {config: [{subnet: 10.10.2.0/24}]}
+  feeder:
+    driver_opts: *net_opts
+    ipam: {config: [{subnet: 10.10.3.0/24}]}

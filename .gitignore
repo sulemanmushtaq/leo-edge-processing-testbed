@@ -1,0 +1,18 @@
+# Experimental outputs stay local (large, machine-specific); directory skeleton is kept.
+data/raw/**
+data/processed/**
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Local Claude Code settings
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Model weights / datasets (add via release or download script instead)
+*.pt
+*.onnx
+*.engine
